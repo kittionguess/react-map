@@ -29,6 +29,10 @@ const baseMapStyles = [
 ];
 
 
+const AirTypeList = [
+    "AQI", "PM25", "PM10", "O3", "CO", "NO2", "SO2"
+]
+
 
 const MapView: React.FC = () => {
     const mapContainer = useRef<HTMLDivElement | null>(null);
@@ -38,6 +42,7 @@ const MapView: React.FC = () => {
     const getColorByIndex = (i: number) => {
         return colorPalette[i % colorPalette.length];
     }
+    const [airtype, setAirType] = useState<any>("AQI");
 
     const [GISData, setGISData] = useState<any[]>([]);
 
@@ -70,7 +75,16 @@ const MapView: React.FC = () => {
             {
                 id: 7, type: "csv", name_en: "bma_cctv", name: "กล้อง cctv", path: "bma_cctv.csv", geojson: null, visible: true, icon: '/assets/images/cctv.png', minzoom: 10, maxzoom: 22
             },
-
+            {
+                id: 8, type: "shp", name_en: "bma_green_area", name: "พื้นที่สีเขียว", path: "bma_green_area.zip", geojson: null, visible: true, icon: null, minzoom: 15, maxzoom: 22
+            },
+            {
+                id: 9, type: "shp", name_en: "bma_building", name: "อาคาร/ตึก", path: "bma_building.zip", geojson: null, visible: true, icon: null, minzoom: 15,
+                maxzoom: 22
+            },
+            {
+                id: 10, type: "api", name_en: "air4thai", name: "รายงานสภาพอากาศ", path: "http://air4thai.com/forweb/getAQI_JSON.php", geojson: null, visible: true, icon: '/assets/images/air.png', minzoom: 15, maxzoom: 22
+            },
 
         ];
         const loadedLayers: any[] = [];
@@ -97,6 +111,25 @@ const MapView: React.FC = () => {
                     }
 
                 }
+                else if (layer.type === "shp") {
+                    const res: any = await webservice.loadShapeFile(`/assets/geodata/${layer.path}`);
+                    if (res.features?.length > 0) geojson = res;
+                }
+                else if (layer.type === "api") {
+                    const res: any = await webservice.loadAPI(layer.path);
+
+                    if (res.data.stations.length > 0) {
+                        geojson = {
+                            type: "FeatureCollection",
+                            features: res.data.stations.map((d: any) => ({
+                                type: "Feature",
+                                geometry: { type: "Point", coordinates: [+d.long, +d.lat] },
+                                properties: d,
+                            })),
+                        };
+
+                    }
+                }
                 const fullLayer = { ...layer, geojson };
                 loadedLayers.push(fullLayer);
 
@@ -113,11 +146,12 @@ const MapView: React.FC = () => {
 
         const sourceId = `${layer.name_en}_${layer.id}_source`;
         const layerId = `${layer.name_en}_${layer.id}_layer`;
-
+        {/*
         mapInstance.addSource(sourceId, {
             type: "geojson",
             data: layer.geojson,
         });
+        */}
 
         let layerConfig: any = {
             id: layerId,
@@ -133,6 +167,42 @@ const MapView: React.FC = () => {
                 visibility: layer.visible ? "visible" : "none",
             },
         };
+
+        if (layer.name_en === "air4thai") {
+            const filteredFeatures = layer.geojson.features.filter((f: any) => {
+                let AQILast: any;
+                try {
+                    AQILast = typeof f.properties.AQILast === "string"
+                        ? JSON.parse(f.properties.AQILast)
+                        : f.properties.AQILast;
+                } catch (e) {
+                    console.error("Invalid AQILast JSON:", e);
+                    return false;
+                }
+
+                if (!AQILast || !AQILast[airtype]) return false;
+
+                const aqiVal = AQILast[airtype].aqi;
+                return aqiVal !== "-1" && aqiVal !== "-999";
+            });
+
+            const filteredGeojson: any = {
+                type: "FeatureCollection",
+                features: filteredFeatures
+            };
+
+            mapInstance.addSource(sourceId, {
+                type: "geojson",
+                data: filteredGeojson,
+            });
+        } else {
+            mapInstance.addSource(sourceId, {
+                type: "geojson",
+                data: layer.geojson,
+            });
+
+        }
+
 
         if (layer.name_en === 'district') {
             layerConfig = {
@@ -224,6 +294,58 @@ const MapView: React.FC = () => {
             }
             return;
         }
+        else if (layer.name_en === 'bma_building') {
+            const color = getColorByIndex(layer.id);
+            const areaExpr: any[] = ['to-number', ['get', 'area_in_me'], 0];
+            const heightExpr: any = [
+                'case',
+                ['<', areaExpr, 200], 6,
+                ['<', areaExpr, 400], 8,
+                20
+            ];
+            layerConfig = {
+                id: layerId,
+                type: 'fill-extrusion',
+                source: sourceId,
+                minzoom: layer.minzoom ?? 0,
+                maxzoom: layer.maxzoom ?? 22,
+                paint: {
+                    'fill-extrusion-color': color,
+                    'fill-extrusion-height': heightExpr,
+                    'fill-extrusion-opacity': 0.9
+                }
+            };
+            map.current?.on('click', layerId, (e) => {
+                const feature = e.features?.[0];
+                if (!feature) return;
+
+                const props = feature.properties || {};
+
+                new maplibregl.Popup()
+                    .setLngLat(e.lngLat)
+                    .setHTML(setContent(props, layer.name_en))
+                    .addTo(map.current!);
+            });
+        }
+        else if (layer.name_en === 'bma_green_area') {
+            layerConfig = {
+                id: layerId,
+                type: "fill",
+                source: sourceId,
+                minzoom: layer.minzoom ?? 0,
+                maxzoom: layer.maxzoom ?? 22,
+                paint: { 'fill-color': '#b3ff80', 'fill-opacity': 1 }
+            };
+        }
+        else if (layer.name_en === "air4thai") {
+            // Add colored HTML markers
+            addAir4ThaiMarkers(layer);
+            return;
+        }
+
+
+
+
         mapInstance.addLayer(layerConfig);
 
     };
@@ -337,9 +459,131 @@ const MapView: React.FC = () => {
             `;
 
         }
+        else if (layer == "bma_building") {
+            content = `
+            <div style="font-size: 12px;">
+            <strong>Building Info</strong><br/>
+                <b>ID:</b> ${props.id}<br/>
+                <b>Area:</b> ${props.area_in_me}<br/>
+                <b>Confidence:</b> ${props.confidence}<br/>
+                <b>latitude:</b> ${props.latitude}<br/>
+                <b>longitude:</b> ${props.longitude}<br/>
+            </div>
+        `
+        }
+        else if (layer == "air4thai") {
+            let AQILast: any = props.AQILast
+            content = `
+              <div style="font-family: sans-serif; font-size: 12px; line-height: 1.4;">
+                <strong style="font-size: 14px;">รายงานสภาพอากาศ</strong>
+                <table style="border-collapse: collapse; margin-top: 8px;">
+                  <tr>
+                    <td style="padding: 4px 8px; font-weight: bold;">ID:</td>
+                    <td style="padding: 4px 8px;">${props.stationID}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 8px; font-weight: bold;">Type:</td>
+                    <td style="padding: 4px 8px;">${props.stationType}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 8px; font-weight: bold;">Name:</td>
+                    <td style="padding: 4px 8px;">${props.nameTH}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 8px; font-weight: bold;">Area:</td>
+                    <td style="padding: 4px 8px;">${props.areaTH}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 8px; font-weight: bold;">Latitude:</td>
+                    <td style="padding: 4px 8px;">${props.lat}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 8px; font-weight: bold;">Longitude:</td>
+                    <td style="padding: 4px 8px;">${props.long}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 8px; font-weight: bold;">วันที่:</td>
+                    <td style="padding: 4px 8px;">${AQILast.date}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 8px; font-weight: bold;">เวลา:</td>
+                    <td style="padding: 4px 8px;">${AQILast.time}</td>
+                  </tr>
+                </table>
+              </div>
+            `;
+        }
         return content
     }
 
+    const air4thaiMarkersRef = useRef<maplibregl.Marker[]>([]);
+
+    const addAir4ThaiMarkers = (layer: any, type?: string) => {
+        if (!map.current) return;
+
+        air4thaiMarkersRef.current.forEach(marker => marker.remove());
+        air4thaiMarkersRef.current = [];
+
+        const features = layer.geojson.features;
+
+        const atype = type ?? airtype
+
+        features.forEach((f: any) => {
+            const coords = f.geometry.coordinates;
+
+            let AQILast: any;
+            try {
+                AQILast = typeof f.properties.AQILast === "string"
+                    ? JSON.parse(f.properties.AQILast)
+                    : f.properties.AQILast;
+            } catch (e) {
+                console.error("Invalid AQILast JSON:", e);
+                return;
+            }
+
+            if (!AQILast || !AQILast[atype]) return;
+
+            const pollutant = AQILast[atype];
+
+            if (!pollutant || pollutant.aqi === "-1" || pollutant.aqi === "-999") return;
+
+            const colorMap: any = {
+                "0": "#808080", // gray
+                "1": "#00bfff", // sky blue
+                "2": "#32cd32", // lime green
+                "3": "#ffa500", // orange
+                "4": "#ff4500", // red-orange
+                "5": "#800080", // purple
+            };
+
+            const color = colorMap[pollutant.color_id] || "#cccccc";
+
+            // 🔵 Marker HTML
+            const markerEl = document.createElement("div");
+            markerEl.style.width = "36px";
+            markerEl.style.height = "36px";
+            markerEl.style.background = color;
+            markerEl.style.borderRadius = "50%";
+            markerEl.style.display = "flex";
+            markerEl.style.alignItems = "center";
+            markerEl.style.justifyContent = "center";
+            markerEl.style.color = "#ffffff";
+            markerEl.style.fontSize = "13px";
+            markerEl.style.fontWeight = "bold";
+            markerEl.style.border = "2px solid white";
+            markerEl.style.boxShadow = "0 0 3px rgba(0,0,0,0.4)";
+            markerEl.innerText = atype == "AQI" ? pollutant.aqi : pollutant.value;
+
+            const marker = new maplibregl.Marker({ element: markerEl })
+                .setLngLat(coords)
+                .setPopup(
+                    new maplibregl.Popup({ offset: 25 }).setHTML(setContent(f.properties, layer.name_en))
+                )
+                .addTo(map.current!);
+
+            air4thaiMarkersRef.current.push(marker);
+        });
+    };
 
     useEffect(() => {
         const mapInstance = new maplibregl.Map({
@@ -374,3 +618,4 @@ const MapView: React.FC = () => {
 };
 
 export default MapView;
+
